@@ -71,10 +71,7 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
                                     value_decoder_def, value_decoder_ema_params, task_embedding_def, task_embedding_ema_params,
                                     delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs)
     """
-    @functools.partial(
-        jax.jit,
-        static_argnames=("psi_sampler", "policy_sampler", "delta_phi_optimizer", "value_decoder_def", "task_embedding_def"),
-    )
+    # Remove JIT for now to debug the issue
     def planner_fn(rng, psi_ema_params, psi_sampler, policy_ema_params, policy_sampler, 
                    value_decoder_def, value_decoder_ema_params, task_embedding_def, task_embedding_ema_params,
                    delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs):
