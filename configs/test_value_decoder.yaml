@@ -17,7 +17,7 @@ feat:
   dim: 32
 
 training:
-  num_steps: 500  # Small for testing
+  num_steps: 50000  # Small for testing
   eval_every: 250
   save_every: 500
   batch_size: 64
