@@ -1,0 +1,66 @@
+hydra:
+  run:
+    dir: logdir/${algo}/${env_id}/${exp_id}/${seed}
+
+algo: "dispo_online_adaptation_test"
+seed: 0
+env_id: "antmaze-medium-diverse-v2"
+exp_id: "test"
+logdir: ${hydra:run.dir}
+gamma: 0.99
+reward_min: 0
+reward_max: 1
+num_reward_samples: 1000  # Reduced for testing
+
+feat:
+  type: "fourier"
+  dim: 32  # Reduced for testing
+
+training:
+  num_steps: 1000  # Very small for testing
+  eval_every: 500
+  save_every: 1000
+  batch_size: 128  # Reduced for testing
+  num_workers: 1
+  resume: False
+  log_psi_video: False  # Disable for testing
+  weighted_regression: False
+  
+model:
+  embed_dim: 64  # Reduced for testing
+  embed_type: "positional"
+  ema_rate: 0.995
+  lr: 3e-4
+  wd: 1e-6
+  warmup_steps: 100  # Reduced for testing
+  sde: "vpsde"
+  beta_min: 0.1
+  beta_max: 20
+  num_steps: 100  # Reduced for testing
+  continuous: False
+  
+  # ValueDecoder configuration (reduced for testing)
+  task_embedding_dim: 16  # Reduced
+  value_hidden_dims: [128, 64]  # Smaller
+  value_dropout: 0.1
+
+sampling:
+  predictor: "ddim"
+  corrector: "none"
+  n_inference_steps: 10  # Reduced for testing
+  eta: 0.0
+
+planning:
+  planner: "random_shooting"  # Use simpler planner for testing first
+  guidance_coef: 1.0
+  num_samples: 50  # Reduced for testing
+  num_elites: 1
+  
+  # Online World Model Adaptation Parameters (for when we test online_adaptation)
+  delta_phi_lr: 1e-3
+  adaptation_steps: 5  # Reduced for testing
+  kl_coef: 1.0
+  n_adaptation_samples: 16  # Reduced for testing
+
+eval:
+  num_episodes: 1  # Just one episode for testing

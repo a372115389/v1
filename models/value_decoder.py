@@ -181,7 +181,7 @@ def create_value_decoder_loss_fn(value_decoder: ValueDecoder, gamma: float = 0.9
         """
         # Current value estimates
         current_values = value_decoder.apply(
-            params, 
+            {"params": params}, 
             batch["features"], 
             task_embedding,
             training=True,
