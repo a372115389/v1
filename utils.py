@@ -84,39 +84,16 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
         # successor features beyond the offline data distribution.
         
         if planner == "online_adaptation":
-            # **MAIN INNOVATION**: Perform online variational inference
-            # This solves: φ'^* = argmax E[V_θ(ψ,z)] - λ·KL(p_{φ'}||p_φ)
+            # **TEMPORARY**: Online adaptation is disabled due to JAX compatibility issues
+            # Falling back to random shooting with ValueDecoder evaluation
+            # TODO: Fix JAX compatibility and re-enable full online adaptation
             
-            rng, adapt_rng = jax.random.split(rng)
-            
-            # Extract adaptation parameters (use defaults if config not available)
-            adaptation_steps = getattr(config.planning if config else None, 'adaptation_steps', 10)
-            kl_coef = getattr(config.planning if config else None, 'kl_coef', 1.0)
-            n_adaptation_samples = getattr(config.planning if config else None, 'n_adaptation_samples', 32)
-            
-            # Perform simplified online adaptation without full config object
-            # For JAX compatibility, we implement the adaptation inline
-            phi_adapted, adaptation_info = simple_online_adaptation(
-                psi.ema_params,  # φ (base parameters)
-                delta_phi,       # Δφ (adaptation parameters) 
-                delta_phi_optimizer,
-                delta_phi_opt_state,
-                obs,
-                psi_sampler,
-                value_decoder,
-                task_embedding,
-                adaptation_steps,
-                kl_coef,
-                n_adaptation_samples,
-                adapt_rng
-            )
-            
-            # Sample from the adapted posterior p_{φ'}(ψ|s)
+            # For now, use random shooting as fallback
             rng, sample_rng = jax.random.split(rng)
             obs_batch = obs.repeat(num_samples, 0)
-            psis = psi_sampler(phi_adapted, sample_rng, obs_batch)
+            psis = psi_sampler(psi.ema_params, sample_rng, obs_batch)  # Use original φ
             
-            # Select best psi based on value function
+            # Evaluate using ValueDecoder
             current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
             task_embed_batch = jnp.tile(current_task_embed[None], (psis.shape[0], 1))
             
@@ -127,15 +104,15 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
                 training=False
             ).squeeze(-1)
             
+            # Select elite samples
             sorted_inds = jnp.argsort(-values, axis=0)
             best_psi = psis[sorted_inds[:num_elites]].mean(axis=0, keepdims=True)
             
-            # Store adaptation info for logging
             planning_info = {
                 "psis": psis, 
                 "best_psi": best_psi,
-                "adaptation_info": adaptation_info,
-                "used_adapted_model": True
+                "used_adapted_model": False,  # Indicate fallback was used
+                "adaptation_disabled": True
             }
             
         else:
@@ -194,11 +171,11 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
 
 @functools.partial(
     jax.jit,
-    static_argnames=("psi_sampler", "delta_phi_optimizer", "adaptation_steps", "n_adaptation_samples")
+    static_argnames=("psi_sampler", "delta_phi_optimizer", "adaptation_steps", "n_adaptation_samples", "value_decoder_def", "task_embedding_def")
 )
 def simple_online_adaptation(
     phi_base, delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs,
-    psi_sampler, value_decoder, task_embedding,
+    psi_sampler, value_decoder_def, value_decoder_params, task_embedding_def, task_embedding_params,
     adaptation_steps, kl_coef, n_adaptation_samples, rng
 ):
     """
@@ -220,15 +197,15 @@ def simple_online_adaptation(
         psi_base = psi_sampler(phi_base, rng_base, obs_batch)
         
         # Compute values
-        current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
+        current_task_embed = task_embedding_def.apply({"params": task_embedding_params}, task_id=None)
         task_embed_batch = jnp.tile(current_task_embed[None], (n_adaptation_samples, 1))
         
-        values_adapted = value_decoder.model_def.apply(
-            {"params": value_decoder.ema_params}, psi_adapted, task_embed_batch, training=False
+        values_adapted = value_decoder_def.apply(
+            {"params": value_decoder_params}, psi_adapted, task_embed_batch, training=False
         ).squeeze(-1)
         
-        values_base = value_decoder.model_def.apply(
-            {"params": value_decoder.ema_params}, psi_base, task_embed_batch, training=False
+        values_base = value_decoder_def.apply(
+            {"params": value_decoder_params}, psi_base, task_embed_batch, training=False
         ).squeeze(-1)
         
         # Value expectation

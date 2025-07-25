@@ -1,0 +1,66 @@
+hydra:
+  run:
+    dir: logdir/${algo}/${env_id}/${exp_id}/${seed}
+
+algo: "dispo_value_decoder_test"
+seed: 0
+env_id: "antmaze-medium-diverse-v2"
+exp_id: "value_decoder_test"
+logdir: ${hydra:run.dir}
+gamma: 0.99
+reward_min: 0
+reward_max: 1
+num_reward_samples: 1000
+
+feat:
+  type: "fourier"
+  dim: 32
+
+training:
+  num_steps: 500  # Small for testing
+  eval_every: 250
+  save_every: 500
+  batch_size: 64
+  num_workers: 1
+  resume: False
+  log_psi_video: False
+  weighted_regression: False
+  
+model:
+  embed_dim: 64
+  embed_type: "positional"
+  ema_rate: 0.995
+  lr: 3e-4
+  wd: 1e-6
+  warmup_steps: 50
+  sde: "vpsde"
+  beta_min: 0.1
+  beta_max: 20
+  num_steps: 100
+  continuous: False
+  
+  # ValueDecoder configuration
+  task_embedding_dim: 8
+  value_hidden_dims: [64, 32]
+  value_dropout: 0.1
+
+sampling:
+  predictor: "ddim"
+  corrector: "none"
+  n_inference_steps: 5
+  eta: 0.0
+
+planning:
+  planner: "random_shooting"  # Test ValueDecoder with random shooting first
+  guidance_coef: 1.0
+  num_samples: 20
+  num_elites: 1
+  
+  # Online adaptation parameters (not used with random_shooting)
+  delta_phi_lr: 1e-3
+  adaptation_steps: 5
+  kl_coef: 1.0
+  n_adaptation_samples: 8
+
+eval:
+  num_episodes: 1

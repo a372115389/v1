@@ -18,8 +18,8 @@ feat:
 
 training:
   num_steps: 100000
-  eval_every: 5000
-  save_every: 5000
+  eval_every: 1000
+  save_every: 1000
   batch_size: 1024
   num_workers: 4
   resume: False
