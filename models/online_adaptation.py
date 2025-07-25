@@ -79,11 +79,11 @@ def create_variational_objective(
         psi_samples_prior = psi_sampler(phi_base, prior_sample_rng, batch_obs)
         
         # Compute value expectation: E_{ψ ~ p_{φ'}(ψ|s)}[V_θ(ψ, z^*)]
-        current_task_embed = task_embedding.model_def.apply(task_embedding.ema_params)
+        current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
         task_embed_batch = jnp.tile(current_task_embed[None], (n_samples, 1))
         
         values_adapted = value_decoder.model_def.apply(
-            value_decoder.ema_params,
+            {"params": value_decoder.ema_params},
             psi_samples_adapted,
             task_embed_batch,
             training=False
@@ -120,7 +120,7 @@ def create_variational_objective(
         # Compute sample-based KL correction (simplified)
         # This captures distributional differences not captured by parameter norm
         values_prior = value_decoder.model_def.apply(
-            value_decoder.ema_params,
+            {"params": value_decoder.ema_params},
             psi_samples_prior,
             task_embed_batch,
             training=False
@@ -229,7 +229,7 @@ def online_world_model_adaptation(
     
     # Combine adapted parameters
     phi_adapted = jax.tree_util.tree_map(
-        lambda base, delta: base + current_delta_phi, phi_base, current_delta_phi
+        lambda base, delta: base + delta, phi_base, current_delta_phi
     )
     
     adaptation_info = {

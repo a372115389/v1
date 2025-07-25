@@ -119,11 +119,11 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
             psis = psi_sampler(phi_adapted, sample_rng, obs_batch)
             
             # Select best psi based on value function
-            current_task_embed = task_embedding.model_def.apply(task_embedding.ema_params)
+            current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
             task_embed_batch = jnp.tile(current_task_embed[None], (psis.shape[0], 1))
             
             values = value_decoder.model_def.apply(
-                value_decoder.ema_params,
+                {"params": value_decoder.ema_params},
                 psis,
                 task_embed_batch,
                 training=False
@@ -150,11 +150,11 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
                 psis = psi_sampler(psi.ema_params, sample_rng, obs_batch)  # Use original φ
                 
                 # Evaluate using ValueDecoder
-                current_task_embed = task_embedding.model_def.apply(task_embedding.ema_params)
+                current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
                 task_embed_batch = jnp.tile(current_task_embed[None], (psis.shape[0], 1))
                 
                 values = value_decoder.model_def.apply(
-                    value_decoder.ema_params,
+                    {"params": value_decoder.ema_params},
                     psis,
                     task_embed_batch,
                     training=False
@@ -221,14 +221,14 @@ def create_guided_diffusion_planner(value_decoder, task_embedding, guidance_coef
             Guidance gradients, shape (batch_size, feat_dim)
         """
         # Get current task embedding
-        current_task_embed = task_embedding.model_def.apply(task_embedding.ema_params)
+        current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
         # Broadcast to match batch size
         task_embed_batch = jnp.tile(current_task_embed[None], (psi_batch.shape[0], 1))
         
         # Define value function for gradient computation
         def batch_value_fn(psi_input):
             values = value_decoder.model_def.apply(
-                value_decoder.ema_params,
+                {"params": value_decoder.ema_params},
                 psi_input,
                 task_embed_batch,
                 training=False

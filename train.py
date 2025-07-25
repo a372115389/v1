@@ -136,7 +136,8 @@ def build_models(config, env, dataset, rng):
         embedding_dim=config.model.get("task_embedding_dim", 32)
     )
     rng, task_rng = jax.random.split(rng)
-    task_embedding_params = task_embedding_def.init(task_rng)["params"]
+    # Initialize task embedding - using None for single-task scenario (global embedding)
+    task_embedding_params = task_embedding_def.init(task_rng, task_id=None)["params"]
     task_embedding = TrainState.create(
         model_def=task_embedding_def,
         params=task_embedding_params,
@@ -291,7 +292,7 @@ def update(
 
     # Update ValueDecoder with current task embedding
     rng, value_rng = jax.random.split(rng)
-    current_task_embed = task_embedding.model_def.apply(task_embedding.params)
+    current_task_embed = task_embedding.model_def.apply({"params": task_embedding.params}, task_id=None)
     # Broadcast to batch size
     task_embed_batch = jnp.tile(current_task_embed[None], (batch["features"].shape[0], 1))
     
@@ -307,7 +308,7 @@ def update(
     # For simplicity, we update it jointly with value decoder gradients
     # In practice, you might want more sophisticated meta-learning updates
     def task_embed_loss_fn(task_params, rng):
-        task_embed = task_embedding.model_def.apply(task_params)
+        task_embed = task_embedding.model_def.apply({"params": task_params}, task_id=None)
         task_embed_batch = jnp.tile(task_embed[None], (batch["features"].shape[0], 1))
         loss, aux = value_decoder_loss_fn(value_decoder.params, batch, task_embed_batch, rng)
         return loss, aux
@@ -374,10 +375,10 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
 
         # Visualize values using ValueDecoder
         if config.training.log_psi_video:
-            current_task_embed = task_embedding.model_def.apply(task_embedding.ema_params)
+            current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
             task_embed_batch = jnp.tile(current_task_embed[None], (pinfo["psis"].shape[0], 1))
             values = value_decoder.model_def.apply(
-                value_decoder.ema_params,
+                {"params": value_decoder.ema_params},
                 pinfo["psis"],
                 task_embed_batch,
                 training=False
