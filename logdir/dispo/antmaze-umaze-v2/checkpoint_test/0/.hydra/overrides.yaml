@@ -1,0 +1,4 @@
+- env_id=antmaze-umaze-v2
+- exp_id=checkpoint_test
+- seed=0
+- training.save_every=50

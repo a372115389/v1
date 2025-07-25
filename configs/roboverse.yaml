@@ -1,0 +1,10 @@
+defaults:
+  - dispo
+  - _self_
+
+feat:
+  type: "dummy"
+
+planning:
+  planner: "guided_diffusion"
+  guidance_coef: 0.05

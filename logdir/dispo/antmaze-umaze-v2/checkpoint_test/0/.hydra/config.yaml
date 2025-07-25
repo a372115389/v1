@@ -1,0 +1,45 @@
+algo: dispo
+seed: 0
+env_id: antmaze-umaze-v2
+exp_id: checkpoint_test
+logdir: ${hydra:run.dir}
+gamma: 0.99
+reward_min: 0
+reward_max: 1
+num_reward_samples: 10000
+feat:
+  type: fourier
+  dim: 64
+training:
+  num_steps: 100000
+  eval_every: 5000
+  save_every: 50
+  batch_size: 1024
+  num_workers: 4
+  resume: false
+  log_psi_video: false
+  weighted_regression: false
+model:
+  embed_dim: 128
+  embed_type: positional
+  ema_rate: 0.995
+  lr: 0.0003
+  wd: 1.0e-06
+  warmup_steps: 500
+  sde: vpsde
+  beta_min: 0.1
+  beta_max: 20
+  num_steps: 1000
+  continuous: false
+sampling:
+  predictor: ddim
+  corrector: none
+  n_inference_steps: 25
+  eta: 0.0
+planning:
+  planner: random_shooting
+  guidance_coef: 0.5
+  num_samples: 500
+  num_elites: 1
+eval:
+  num_episodes: 10

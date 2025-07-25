@@ -1,0 +1,8 @@
+defaults:
+  - dispo
+  - _self_
+
+planning:
+  planner: "guided_diffusion"
+  guidance_coef: 0.5
+
