@@ -1,0 +1,60 @@
+hydra:
+  run:
+    dir: logdir/${algo}/${env_id}/${exp_id}/${seed}
+
+algo: "debug_loop"
+seed: 0
+env_id: "antmaze-medium-diverse-v2"
+exp_id: "debug_loop"
+logdir: ${hydra:run.dir}
+gamma: 0.99
+reward_min: 0
+reward_max: 1
+num_reward_samples: 100
+
+feat:
+  type: "fourier"
+  dim: 8  # Minimal
+
+training:
+  num_steps: 50    # Very small for quick testing
+  eval_every: 25   # Single evaluation to test
+  save_every: 1000 # No saving
+  batch_size: 16
+  num_workers: 1
+  resume: False
+  log_psi_video: False
+  weighted_regression: False
+  
+model:
+  embed_dim: 16    # Minimal
+  embed_type: "positional"
+  ema_rate: 0.995
+  lr: 3e-4
+  wd: 1e-6
+  warmup_steps: 2
+  sde: "vpsde"
+  beta_min: 0.1
+  beta_max: 20
+  num_steps: 10    # Minimal diffusion steps
+  continuous: False
+  
+  # ValueDecoder configuration (minimal)
+  task_embedding_dim: 4
+  value_hidden_dims: [16, 8]
+  value_dropout: 0.0
+
+sampling:
+  predictor: "ddim"
+  corrector: "none"
+  n_inference_steps: 2  # Minimal
+  eta: 0.0
+
+planning:
+  planner: "random_shooting"
+  guidance_coef: 0.0  # No guidance
+  num_samples: 2      # Minimal
+  num_elites: 1
+
+eval:
+  num_episodes: 1

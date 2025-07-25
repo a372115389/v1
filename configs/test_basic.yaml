@@ -18,7 +18,7 @@ feat:
 
 training:
   num_steps: 1000  # Small for testing but enough for warmup
-  eval_every: 250
+  eval_every: 500  # Less frequent evaluation for faster training
   save_every: 500
   batch_size: 64
   num_workers: 1
@@ -53,7 +53,7 @@ sampling:
 planning:
   planner: "random_shooting"  # Use basic planner to test fundamentals
   guidance_coef: 1.0
-  num_samples: 10  # Very small for testing
+  num_samples: 5   # Even smaller for faster evaluation
   num_elites: 1
   
   # These won't be used with random_shooting but keep for compatibility

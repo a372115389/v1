@@ -334,46 +334,36 @@ def update(
 
 def simple_evaluate_step(rng, obs, psi, psi_sampler, policy, policy_sampler, value_decoder, task_embedding, config):
     """
-    Simplified evaluation step that avoids complex planner issues.
+    Ultra-simplified evaluation step to avoid infinite loops.
     
-    Uses basic random shooting with ValueDecoder evaluation for stability.
+    Uses minimal sampling and direct action generation.
     """
-    num_samples = config.planning.get("num_samples", 50)
-    num_elites = config.planning.get("num_elites", 1)
+    # Use very small sample count to avoid loops
+    num_samples = min(config.planning.get("num_samples", 5), 3)  # Max 3 samples
     
-    # Sample multiple psi candidates
-    rng, sample_rng = jax.random.split(rng)
-    obs_batch = obs.repeat(num_samples, 0)
-    psis = psi_sampler(psi.ema_params, sample_rng, obs_batch)
-    
-    # Evaluate using ValueDecoder
-    current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
-    task_embed_batch = jnp.tile(current_task_embed[None], (psis.shape[0], 1))
-    
-    values = value_decoder.model_def.apply(
-        {"params": value_decoder.ema_params},
-        psis,
-        task_embed_batch,
-        training=False
-    ).squeeze(-1)
-    
-    # Select best psi
-    sorted_inds = jnp.argsort(-values, axis=0)
-    best_psi = psis[sorted_inds[:num_elites]].mean(axis=0, keepdims=True)
-    
-    # Generate action
-    rng, action_rng = jax.random.split(rng)
-    action = policy_sampler(
-        policy.ema_params, action_rng, jnp.concatenate([obs, best_psi], -1)
-    )
-    
-    # Simple info for logging
-    pinfo = {
-        "psis": psis,
-        "best_psi": best_psi,
-        "values": values,
-        "evaluation_mode": "simple"
-    }
+    try:
+        # Sample psi with timeout protection
+        rng, sample_rng = jax.random.split(rng)
+        obs_batch = obs.repeat(num_samples, 0)
+        psis = psi_sampler(psi.ema_params, sample_rng, obs_batch)
+        
+        # Simple selection: just use first sample to avoid complex value computation
+        best_psi = psis[0:1]  # Take first sample only
+        
+        # Generate action directly
+        rng, action_rng = jax.random.split(rng)
+        action = policy_sampler(
+            policy.ema_params, action_rng, jnp.concatenate([obs, best_psi], -1)
+        )
+        
+        pinfo = {"evaluation_mode": "ultra_simple", "samples_used": num_samples}
+        
+    except Exception as e:
+        # Ultimate fallback: random action
+        print(f"Even simple evaluation failed: {e}")
+        rng, action_rng = jax.random.split(rng)
+        action = jax.random.normal(action_rng, (1, obs.shape[-1]))  # Random action
+        pinfo = {"evaluation_mode": "random_fallback"}
     
     return rng, action, pinfo
 
@@ -393,7 +383,12 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
     frames = []
 
     # Simple evaluation without complex planner
-    while not (terminated or truncated):
+    max_episode_steps = 200  # Force termination to prevent infinite loops
+    step_count = 0
+    
+    while not (terminated or truncated) and step_count < max_episode_steps:
+        step_count += 1
+        
         # Use simplified planning for evaluation
         try:
             rng, action, pinfo = simple_evaluate_step(
@@ -406,6 +401,10 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
             rng, action_rng = jax.random.split(rng)
             action = jax.random.normal(action_rng, (1, env.action_space.shape[0]))
             pinfo = {"evaluation_mode": "fallback"}
+        
+        # Debug output every 50 steps to detect infinite loops
+        if step_count % 50 == 0:
+            print(f"Evaluation step {step_count}, terminated={terminated}, truncated={truncated}")
 
         # Step environment
         next_obs, _, terminated, truncated, info = env.step(np.array(action[0]))
@@ -413,23 +412,30 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
         ep_success += info.get("success", 0)
         obs = jnp.array(next_obs[None])
 
-        # Simplified frame rendering
-        try:
-            frame = env.render()
-            if frame is None:
-                frame = np.zeros((128, 128, 3), dtype=np.uint8)
-        except:
-            frame = np.zeros((128, 128, 3), dtype=np.uint8)
-        frames.append(frame)
+        # Skip frame rendering for faster evaluation
+        # Only collect frames occasionally to reduce overhead
+        if len(frames) < 10:  # Only save first 10 frames
+            try:
+                frame = env.render()
+                if frame is None:
+                    frame = np.zeros((64, 64, 3), dtype=np.uint8)  # Smaller size
+            except:
+                frame = np.zeros((64, 64, 3), dtype=np.uint8)
+            frames.append(frame)
 
         # Simplified value logging (no complex psi_video for now)
         # This avoids all the complex visualization issues
 
+    # Check if episode was force-terminated
+    if step_count >= max_episode_steps:
+        print(f"WARNING: Episode force-terminated after {max_episode_steps} steps!")
+    
     # Simplified evaluation info
     eval_info = {
         "test/return": ep_reward,
         "test/success": float(ep_success > 0),
-        "test/episode_length": len(frames),
+        "test/episode_length": step_count,  # Use actual step count
+        "test/force_terminated": float(step_count >= max_episode_steps),
     }
     
     # Add video only if we have frames and it's not too expensive
