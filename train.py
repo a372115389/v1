@@ -136,9 +136,10 @@ def build_models(config, env, dataset, rng):
     rng, task_rng = jax.random.split(rng)
     # Initialize task embedding - using None for single-task scenario (global embedding)
     task_embedding_params = task_embedding_def.init(task_rng, task_id=None)["params"]
-    task_embedding = TrainState.create(
+    task_embedding = EMATrainState.create(
         model_def=task_embedding_def,
         params=task_embedding_params,
+        ema_rate=config.model.ema_rate,
         tx=optax.chain(
             clip_by_global_norm(1.0),
             optax.adamw(learning_rate=lr_fn, weight_decay=config.model.wd),
