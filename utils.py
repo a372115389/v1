@@ -73,7 +73,7 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
     """
     @functools.partial(
         jax.jit,
-        static_argnames=("psi_sampler", "policy_sampler"),
+        static_argnames=("psi_sampler", "policy_sampler", "delta_phi_optimizer"),
     )
     def planner_fn(rng, psi, psi_sampler, policy, policy_sampler, value_decoder, 
                    task_embedding, delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs):
@@ -89,27 +89,25 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
             
             rng, adapt_rng = jax.random.split(rng)
             
-            # Use provided config or create default if not available
-            if config is None:
-                class DefaultConfig:
-                    class planning:
-                        adaptation_steps = 10
-                        kl_coef = 1.0
-                        n_adaptation_samples = 32
-                config = DefaultConfig()
+            # Extract adaptation parameters (use defaults if config not available)
+            adaptation_steps = getattr(config.planning if config else None, 'adaptation_steps', 10)
+            kl_coef = getattr(config.planning if config else None, 'kl_coef', 1.0)
+            n_adaptation_samples = getattr(config.planning if config else None, 'n_adaptation_samples', 32)
             
-            # Perform online world model adaptation
-            phi_adapted, updated_opt_state, adaptation_info = online_world_model_adaptation_jit(
+            # Perform simplified online adaptation without full config object
+            # For JAX compatibility, we implement the adaptation inline
+            phi_adapted, adaptation_info = simple_online_adaptation(
                 psi.ema_params,  # φ (base parameters)
                 delta_phi,       # Δφ (adaptation parameters) 
                 delta_phi_optimizer,
                 delta_phi_opt_state,
                 obs,
                 psi_sampler,
-                psi.sde if hasattr(psi, 'sde') else None,  # SDE object
                 value_decoder,
                 task_embedding,
-                config,
+                adaptation_steps,
+                kl_coef,
+                n_adaptation_samples,
                 adapt_rng
             )
             
@@ -192,6 +190,90 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
         return rng, action, planning_info
 
     return planner_fn
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("psi_sampler", "delta_phi_optimizer", "adaptation_steps", "n_adaptation_samples")
+)
+def simple_online_adaptation(
+    phi_base, delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs,
+    psi_sampler, value_decoder, task_embedding,
+    adaptation_steps, kl_coef, n_adaptation_samples, rng
+):
+    """
+    Simplified online world model adaptation for JAX compatibility.
+    
+    This is a streamlined version that avoids complex config objects
+    and focuses on the core adaptation logic.
+    """
+    
+    def adaptation_objective(delta_phi_current, rng_step):
+        # Combine parameters
+        phi_adapted = jax.tree_util.tree_map(lambda base, delta: base + delta, phi_base, delta_phi_current)
+        
+        # Sample from adapted and base distributions
+        rng_adapted, rng_base = jax.random.split(rng_step)
+        obs_batch = jnp.tile(obs, (n_adaptation_samples, 1))
+        
+        psi_adapted = psi_sampler(phi_adapted, rng_adapted, obs_batch)
+        psi_base = psi_sampler(phi_base, rng_base, obs_batch)
+        
+        # Compute values
+        current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
+        task_embed_batch = jnp.tile(current_task_embed[None], (n_adaptation_samples, 1))
+        
+        values_adapted = value_decoder.model_def.apply(
+            {"params": value_decoder.ema_params}, psi_adapted, task_embed_batch, training=False
+        ).squeeze(-1)
+        
+        values_base = value_decoder.model_def.apply(
+            {"params": value_decoder.ema_params}, psi_base, task_embed_batch, training=False
+        ).squeeze(-1)
+        
+        # Value expectation
+        value_expectation = jnp.mean(values_adapted)
+        
+        # KL approximation
+        param_kl = 0.5 * sum(jnp.sum(delta ** 2) for delta in jax.tree_util.tree_leaves(delta_phi_current))
+        sample_kl_proxy = jnp.mean((values_adapted - values_base) ** 2)
+        kl_divergence = param_kl + 0.1 * sample_kl_proxy
+        
+        # Objective (negative for minimization)
+        objective = value_expectation - kl_coef * kl_divergence
+        return -objective, {
+            "value_expectation": value_expectation,
+            "kl_divergence": kl_divergence,
+        }
+    
+    # Online optimization loop
+    current_delta_phi = delta_phi
+    current_opt_state = delta_phi_opt_state
+    
+    for step in range(adaptation_steps):
+        rng, step_rng = jax.random.split(rng)
+        
+        # Compute gradients
+        (loss, info), grads = jax.value_and_grad(adaptation_objective, has_aux=True)(
+            current_delta_phi, step_rng
+        )
+        
+        # Apply updates
+        updates, new_opt_state = delta_phi_optimizer.update(grads, current_opt_state)
+        new_delta_phi = optax.apply_updates(current_delta_phi, updates)
+        
+        current_delta_phi = new_delta_phi
+        current_opt_state = new_opt_state
+    
+    # Combine final parameters
+    phi_adapted = jax.tree_util.tree_map(lambda base, delta: base + current_delta_phi, phi_base, current_delta_phi)
+    
+    adaptation_info = {
+        "final_delta_phi_norm": sum(jnp.sum(delta ** 2) for delta in jax.tree_util.tree_leaves(current_delta_phi)),
+        "adaptation_steps": adaptation_steps,
+    }
+    
+    return phi_adapted, adaptation_info
 
 
 def create_guided_diffusion_planner(value_decoder, task_embedding, guidance_coef=1.0):

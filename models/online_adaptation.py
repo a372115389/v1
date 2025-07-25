@@ -246,5 +246,5 @@ def online_world_model_adaptation(
 # JIT-compiled version for efficiency
 online_world_model_adaptation_jit = jax.jit(
     online_world_model_adaptation,
-    static_argnames=("psi_sampler", "psi_sde", "config")
+    static_argnames=("psi_sampler", "psi_sde", "config", "delta_phi_optimizer")
 )
