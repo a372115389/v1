@@ -17,7 +17,7 @@ feat:
   dim: 32
 
 training:
-  num_steps: 500  # Very small for testing
+  num_steps: 1000  # Small for testing but enough for warmup
   eval_every: 250
   save_every: 500
   batch_size: 64
@@ -32,7 +32,7 @@ model:
   ema_rate: 0.995
   lr: 3e-4
   wd: 1e-6
-  warmup_steps: 50
+  warmup_steps: 10  # Much shorter warmup for small test
   sde: "vpsde"
   beta_min: 0.1
   beta_max: 20
