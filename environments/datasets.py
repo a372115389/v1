@@ -14,6 +14,8 @@ class OfflineDataset(Dataset):
         rewards,
         next_observations,
         dones,
+        gamma=0.99,
+        compute_returns=True,
     ):
         if len(observations.shape) == 4:
             obs_dtype = np.uint8
@@ -24,6 +26,14 @@ class OfflineDataset(Dataset):
         self.rewards = np.array(rewards).astype(np.float32).reshape(-1, 1)
         self.next_observations = np.array(next_observations).astype(obs_dtype)
         self.dones = np.array(dones).astype(np.float32).reshape(-1, 1)
+        
+        # Compute Monte Carlo returns for ValueDecoder training
+        if compute_returns:
+            self.returns = self._compute_monte_carlo_returns(
+                self.rewards.flatten(), self.dones.flatten(), gamma
+            ).reshape(-1, 1)
+        else:
+            self.returns = self.rewards.copy()
 
     def __len__(self):
         return len(self.observations)
@@ -33,9 +43,37 @@ class OfflineDataset(Dataset):
             observations=self.observations[idx],
             actions=self.actions[idx],
             rewards=self.rewards[idx],
+            returns=self.returns[idx],  # Add Monte Carlo returns
             next_observations=self.next_observations[idx],
             dones=self.dones[idx],
         )
+    
+    def _compute_monte_carlo_returns(self, rewards, dones, gamma):
+        """
+        Compute Monte Carlo returns for the dataset.
+        
+        This provides more stable training targets for the ValueDecoder
+        compared to bootstrapped TD estimates.
+        
+        Args:
+            rewards: Array of rewards, shape (N,)
+            dones: Array of done flags, shape (N,)
+            gamma: Discount factor
+            
+        Returns:
+            Monte Carlo returns, shape (N,)
+        """
+        returns = np.zeros_like(rewards)
+        running_return = 0.0
+        
+        # Compute returns backwards through episodes
+        for i in reversed(range(len(rewards))):
+            if dones[i]:
+                running_return = 0.0
+            running_return = rewards[i] + gamma * running_return
+            returns[i] = running_return
+        
+        return returns
 
 
 class D4RLDataset(OfflineDataset):

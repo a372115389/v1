@@ -19,6 +19,8 @@ from models.nets import ConditionalUnet1D
 from models.sampling import get_pc_sampler
 from models.sde_lib import VPSDE
 from models.utils import TrainState, EMATrainState, get_loss_fn
+from models.value_decoder import ValueDecoder, TaskEmbedding, create_value_decoder_loss_fn, compute_monte_carlo_returns
+from models.online_adaptation import online_world_model_adaptation_jit
 from utils import clip_by_global_norm, get_planner
 
 
@@ -129,24 +131,95 @@ def build_models(config, env, dataset, rng):
         eta=config.sampling.eta,
     )
 
-    # Infer reward weights
-    w_def = nn.Dense(1, use_bias=False)
-    reward_weights = dataset.infer_reward_weights(config.num_reward_samples)
-    w_params = {"kernel": reward_weights}
-    w = TrainState.create(
-        model_def=w_def,
-        params=w_params,
+    # Initialize ValueDecoder and TaskEmbedding (replacing linear reward weights)
+    task_embedding_def = TaskEmbedding(
+        embedding_dim=config.model.get("task_embedding_dim", 32)
     )
+    rng, task_rng = jax.random.split(rng)
+    task_embedding_params = task_embedding_def.init(task_rng)["params"]
+    task_embedding = TrainState.create(
+        model_def=task_embedding_def,
+        params=task_embedding_params,
+        tx=optax.chain(
+            clip_by_global_norm(1.0),
+            optax.adamw(learning_rate=lr_fn, weight_decay=config.model.wd),
+        ),
+    )
+    
+    value_decoder_def = ValueDecoder(
+        hidden_dims=config.model.get("value_hidden_dims", (512, 256, 128)),
+        task_embedding_dim=config.model.get("task_embedding_dim", 32),
+        dropout_rate=config.model.get("value_dropout", 0.1),
+    )
+    rng, value_rng = jax.random.split(rng)
+    # Initialize with dummy inputs
+    dummy_psi = jnp.ones((1, feat_dim))
+    dummy_task_embed = jnp.ones((1, config.model.get("task_embedding_dim", 32)))
+    value_decoder_params = value_decoder_def.init(
+        value_rng, dummy_psi, dummy_task_embed, training=True
+    )["params"]
+    value_decoder = EMATrainState.create(
+        model_def=value_decoder_def,
+        params=value_decoder_params,
+        ema_rate=config.model.ema_rate,
+        tx=optax.chain(
+            clip_by_global_norm(1.0),
+            optax.adamw(learning_rate=lr_fn, weight_decay=config.model.wd),
+        ),
+    )
+    
+    # Create value decoder loss function
+    value_decoder_loss_fn = create_value_decoder_loss_fn(
+        value_decoder_def, 
+        gamma=config.gamma
+    )
+    
+    # Initialize online adaptation parameters Δφ for world model adaptation
+    # This implements the core innovation: φ' = φ + Δφ where Δφ is optimized online
+    # to create a value-conditioned posterior distribution p_{φ'}(ψ|s)
+    
+    # Create Δφ with the same structure as psi_params but initialized to zeros
+    # This ensures φ + Δφ maintains the same parameter structure as the original model
+    delta_phi_init = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), psi_params)
+    
+    # Create online optimizer for Δφ with smaller learning rate for stability
+    # Using Adam with adaptive learning rate for better convergence in short optimization loops
+    delta_phi_lr = config.planning.get("delta_phi_lr", 1e-3)  # Smaller LR for online adaptation
+    delta_phi_optimizer = optax.adam(learning_rate=delta_phi_lr)
+    delta_phi_opt_state = delta_phi_optimizer.init(delta_phi_init)
 
-    # Build planner
-    guidance_fn = (
-        lambda w: w.params["kernel"].T * 0.5 * psi_range * config.planning.guidance_coef
-    )
+    # Build planner with new ValueDecoder-based guidance
+    def guidance_fn_builder(value_decoder_state, task_embedding_state):
+        """Build guidance function that uses ValueDecoder gradients instead of linear weights"""
+        def guidance_fn(psi_batch):
+            # Get current task embedding
+            task_embed = task_embedding_state.model_def.apply(
+                task_embedding_state.params
+            )
+            # Broadcast task embedding to match batch size
+            task_embed_batch = jnp.tile(task_embed[None], (psi_batch.shape[0], 1))
+            
+            # Compute gradient guidance using ValueDecoder
+            def value_fn(psi_input):
+                values = value_decoder_state.model_def.apply(
+                    value_decoder_state.ema_params,
+                    psi_input,
+                    task_embed_batch,
+                    training=False
+                )
+                return values.sum()
+            
+            guidance = jax.grad(value_fn)(psi_batch)
+            return guidance * config.planning.guidance_coef
+        
+        return guidance_fn
+    
     planner = get_planner(
         config.planning.planner,
-        guidance_fn,
+        guidance_fn_builder,
         config.planning.num_samples,
         config.planning.num_elites,
+        config,  # Pass full config for adaptation parameters
     )
 
     return (
@@ -156,7 +229,12 @@ def build_models(config, env, dataset, rng):
         policy,
         policy_sampler,
         policy_loss_fn,
-        w,
+        value_decoder,
+        value_decoder_loss_fn,
+        task_embedding,
+        delta_phi_init,
+        delta_phi_optimizer,
+        delta_phi_opt_state,
         planner,
         rng,
     )
@@ -169,6 +247,7 @@ def build_models(config, env, dataset, rng):
         "psi_sampler",
         "psi_loss_fn",
         "policy_loss_fn",
+        "value_decoder_loss_fn",
     ),
 )
 def update(
@@ -179,6 +258,9 @@ def update(
     psi_loss_fn,
     policy,
     policy_loss_fn,
+    value_decoder,
+    value_decoder_loss_fn,
+    task_embedding,
     batch,
 ):
     # Sample target psi
@@ -207,14 +289,48 @@ def update(
         has_aux=True,
     )
 
+    # Update ValueDecoder with current task embedding
+    rng, value_rng = jax.random.split(rng)
+    current_task_embed = task_embedding.model_def.apply(task_embedding.params)
+    # Broadcast to batch size
+    task_embed_batch = jnp.tile(current_task_embed[None], (batch["features"].shape[0], 1))
+    
+    value_decoder, value_info = value_decoder.apply_loss_fn(
+        loss_fn=value_decoder_loss_fn,
+        rng=value_rng,
+        batch=batch,
+        task_embedding=task_embed_batch,
+        has_aux=True,
+    )
+
+    # Update TaskEmbedding (using value decoder gradients for meta-learning)
+    # For simplicity, we update it jointly with value decoder gradients
+    # In practice, you might want more sophisticated meta-learning updates
+    def task_embed_loss_fn(task_params, rng):
+        task_embed = task_embedding.model_def.apply(task_params)
+        task_embed_batch = jnp.tile(task_embed[None], (batch["features"].shape[0], 1))
+        loss, aux = value_decoder_loss_fn(value_decoder.params, batch, task_embed_batch, rng)
+        return loss, aux
+    
+    rng, task_rng = jax.random.split(rng)
+    task_embedding, task_info = task_embedding.apply_loss_fn(
+        loss_fn=task_embed_loss_fn,
+        rng=task_rng,
+        has_aux=True,
+    )
+
     train_info = {
         "train/psi_loss": psi_info["loss"],
         "train/policy_loss": policy_info["loss"],
+        "train/value_decoder_loss": value_info["value_loss"],
+        "train/value_decoder_l2": value_info["l2_loss"],
+        "train/mean_predicted_value": value_info["mean_predicted_value"],
+        "train/task_embedding_loss": task_info["value_loss"],
     }
-    return rng, psi, policy, train_info
+    return rng, psi, policy, value_decoder, task_embedding, train_info
 
 
-def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler, w):
+def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler, value_decoder, task_embedding, delta_phi, delta_phi_optimizer, delta_phi_opt_state):
     # Evaluate online
     obs, _ = env.reset()
     obs = jnp.array(obs[None])
@@ -230,7 +346,8 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
 
     while not (terminated or truncated):
         rng, action, pinfo = planner(
-            rng, psi, psi_sampler, policy, policy_sampler, w, obs
+            rng, psi, psi_sampler, policy, policy_sampler, value_decoder, task_embedding, 
+            delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs
         )
 
         # Step environment
@@ -255,9 +372,16 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
                 frame = np.zeros((128, 128, 3), dtype=np.uint8)
         frames.append(frame)
 
-        # Visualize values
+        # Visualize values using ValueDecoder
         if config.training.log_psi_video:
-            values = w(pinfo["psis"]).sum(-1)
+            current_task_embed = task_embedding.model_def.apply(task_embedding.ema_params)
+            task_embed_batch = jnp.tile(current_task_embed[None], (pinfo["psis"].shape[0], 1))
+            values = value_decoder.model_def.apply(
+                value_decoder.ema_params,
+                pinfo["psis"],
+                task_embed_batch,
+                training=False
+            ).squeeze(-1)
             fig = plt.figure(figsize=(3, 3))
             plt.hist(values, bins=value_bins, density=True)
             plt.ylim([0, 1])
@@ -321,7 +445,12 @@ def train(config):
         policy,
         policy_sampler,
         policy_loss_fn,
-        w,
+        value_decoder,
+        value_decoder_loss_fn,
+        task_embedding,
+        delta_phi_init,
+        delta_phi_optimizer,
+        delta_phi_opt_state,
         planner,
         rng,
     ) = build_models(config, env, dataset, rng)
@@ -339,7 +468,7 @@ def train(config):
     for epoch in range(num_epochs):
         for batch in dataloader:
             batch = {k: jnp.array(v) for k, v in batch.items()}
-            rng, psi, policy, train_info = update(
+            rng, psi, policy, value_decoder, task_embedding, train_info = update(
                 config,
                 rng,
                 psi,
@@ -347,12 +476,18 @@ def train(config):
                 psi_loss_fn,
                 policy,
                 policy_loss_fn,
+                value_decoder,
+                value_decoder_loss_fn,
+                task_embedding,
                 batch,
             )
             wandb.log(train_info)
 
             # Evaluate
             if (step + 1) % config.training.eval_every == 0:
+                # Reset delta_phi for evaluation to use unbiased world model
+                eval_delta_phi = delta_phi_init  # Use zero delta_phi for unbiased evaluation
+                
                 rng, eval_info = evaluate(
                     config,
                     rng,
@@ -362,7 +497,11 @@ def train(config):
                     psi_sampler,
                     policy,
                     policy_sampler,
-                    w,
+                    value_decoder,
+                    task_embedding,
+                    eval_delta_phi,
+                    delta_phi_optimizer,
+                    delta_phi_opt_state,
                 )
                 wandb.log(eval_info)
 
@@ -374,7 +513,13 @@ def train(config):
                 except Exception:
                     # If resolution fails, save without resolving interpolations
                     config_dict = OmegaConf.to_container(config, resolve=False)
-                ckpt = {"config": config_dict, "psi": psi, "policy": policy, "w": w}
+                ckpt = {
+                    "config": config_dict, 
+                    "psi": psi, 
+                    "policy": policy, 
+                    "value_decoder": value_decoder,
+                    "task_embedding": task_embedding
+                }
                 checkpoint_manager.save(step, ckpt)
 
             step += 1
