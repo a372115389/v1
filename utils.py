@@ -67,16 +67,17 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
         num_elites: Number of elite samples to average
         
     Returns:
-        Planner function that takes (rng, psi, psi_sampler, policy, policy_sampler,
-                                    value_decoder, task_embedding, delta_phi, 
-                                    delta_phi_optimizer, delta_phi_opt_state, obs)
+        Planner function that takes (rng, psi_ema_params, psi_sampler, policy_ema_params, policy_sampler,
+                                    value_decoder_def, value_decoder_ema_params, task_embedding_def, task_embedding_ema_params,
+                                    delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs)
     """
     @functools.partial(
         jax.jit,
-        static_argnames=("psi_sampler", "policy_sampler", "delta_phi_optimizer"),
+        static_argnames=("psi_sampler", "policy_sampler", "delta_phi_optimizer", "value_decoder_def", "task_embedding_def"),
     )
-    def planner_fn(rng, psi, psi_sampler, policy, policy_sampler, value_decoder, 
-                   task_embedding, delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs):
+    def planner_fn(rng, psi_ema_params, psi_sampler, policy_ema_params, policy_sampler, 
+                   value_decoder_def, value_decoder_ema_params, task_embedding_def, task_embedding_ema_params,
+                   delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs):
         
         # CORE INNOVATION: Online World Model Adaptation
         # Instead of using the static world model p_φ(ψ|s), we dynamically adapt it
@@ -91,14 +92,14 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
             # For now, use random shooting as fallback
             rng, sample_rng = jax.random.split(rng)
             obs_batch = obs.repeat(num_samples, 0)
-            psis = psi_sampler(psi.ema_params, sample_rng, obs_batch)  # Use original φ
+            psis = psi_sampler(psi_ema_params, sample_rng, obs_batch)  # Use original φ
             
             # Evaluate using ValueDecoder
-            current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
+            current_task_embed = task_embedding_def.apply({"params": task_embedding_ema_params}, task_id=None)
             task_embed_batch = jnp.tile(current_task_embed[None], (psis.shape[0], 1))
             
-            values = value_decoder.model_def.apply(
-                {"params": value_decoder.ema_params},
+            values = value_decoder_def.apply(
+                {"params": value_decoder_ema_params},
                 psis,
                 task_embed_batch,
                 training=False
@@ -122,14 +123,14 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
             if planner == "random_shooting":
                 # Random shooting with ValueDecoder-based evaluation (original method)
                 obs_batch = obs.repeat(num_samples, 0)
-                psis = psi_sampler(psi.ema_params, sample_rng, obs_batch)  # Use original φ
+                psis = psi_sampler(psi_ema_params, sample_rng, obs_batch)  # Use original φ
                 
                 # Evaluate using ValueDecoder
-                current_task_embed = task_embedding.model_def.apply({"params": task_embedding.ema_params}, task_id=None)
+                current_task_embed = task_embedding_def.apply({"params": task_embedding_ema_params}, task_id=None)
                 task_embed_batch = jnp.tile(current_task_embed[None], (psis.shape[0], 1))
                 
-                values = value_decoder.model_def.apply(
-                    {"params": value_decoder.ema_params},
+                values = value_decoder_def.apply(
+                    {"params": value_decoder_ema_params},
                     psis,
                     task_embed_batch,
                     training=False
@@ -141,12 +142,28 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
                 
             elif planner == "guided_diffusion":
                 # Guided diffusion with ValueDecoder gradients (original method)
-                guidance_fn = guidance_fn_builder(value_decoder, task_embedding)
-                
+                # Note: guidance_fn_builder needs to be updated for new parameter structure
+                # For now, create a simple guidance function
                 def guidance_wrapper(psi_batch):
-                    return guidance_fn(psi_batch)
+                    # Get current task embedding
+                    current_task_embed = task_embedding_def.apply({"params": task_embedding_ema_params}, task_id=None)
+                    task_embed_batch = jnp.tile(current_task_embed[None], (psi_batch.shape[0], 1))
+                    
+                    # Define value function for gradient computation
+                    def batch_value_fn(psi_input):
+                        values = value_decoder_def.apply(
+                            {"params": value_decoder_ema_params},
+                            psi_input,
+                            task_embed_batch,
+                            training=False
+                        )
+                        return values.sum()
+                    
+                    # Compute gradients w.r.t. psi
+                    gradients = jax.grad(batch_value_fn)(psi_batch)
+                    return gradients * (config.planning.guidance_coef if config else 1.0)
                 
-                psis = psi_sampler(psi.ema_params, sample_rng, obs, guidance_wrapper)  # Use original φ
+                psis = psi_sampler(psi_ema_params, sample_rng, obs, guidance_wrapper)  # Use original φ
                 best_psi = psis
                 
             else:
@@ -161,7 +178,7 @@ def get_planner(planner, guidance_fn_builder, num_samples, num_elites, config=No
         # Predict action using the selected psi (same for all methods)
         rng, action_rng = jax.random.split(rng)
         action = policy_sampler(
-            policy.ema_params, action_rng, jnp.concatenate([obs, best_psi], -1)
+            policy_ema_params, action_rng, jnp.concatenate([obs, best_psi], -1)
         )
 
         return rng, action, planning_info
