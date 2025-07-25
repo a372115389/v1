@@ -347,7 +347,9 @@ def evaluate(config, rng, env, planner, psi, psi_sampler, policy, policy_sampler
 
     while not (terminated or truncated):
         rng, action, pinfo = planner(
-            rng, psi, psi_sampler, policy, policy_sampler, value_decoder, task_embedding, 
+            rng, psi.ema_params, psi_sampler, policy.ema_params, policy_sampler, 
+            value_decoder.model_def, value_decoder.ema_params, 
+            task_embedding.model_def, task_embedding.ema_params,
             delta_phi, delta_phi_optimizer, delta_phi_opt_state, obs
         )
 
