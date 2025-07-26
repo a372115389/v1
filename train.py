@@ -334,13 +334,35 @@ def update(
 
 def simple_evaluate_step(rng, obs, psi, psi_sampler, policy, policy_sampler, value_decoder, task_embedding, config):
     """
-    Ultra-simplified evaluation step to avoid infinite loops.
+    Ultra-simplified evaluation step to test JIT compatibility.
     
-    Uses minimal sampling and direct action generation.
+    Completely avoids ValueDecoder and complex sampling when guidance is disabled.
     """
-    # Use very small sample count to avoid loops
+    guidance_coef = config.planning.get("guidance_coef", 1.0)
     num_samples = min(config.planning.get("num_samples", 5), 3)  # Max 3 samples
     
+    # If no guidance, use even simpler approach
+    if guidance_coef == 0.0:
+        try:
+            # Minimal sampling - just one sample
+            rng, sample_rng = jax.random.split(rng)
+            psis = psi_sampler(psi.ema_params, sample_rng, obs)  # Single observation
+            best_psi = psis  # Use the single sample directly
+            
+            # Generate action directly
+            rng, action_rng = jax.random.split(rng)
+            action = policy_sampler(
+                policy.ema_params, action_rng, jnp.concatenate([obs, best_psi], -1)
+            )
+            
+            pinfo = {"evaluation_mode": "no_guidance", "guidance_disabled": True}
+            return rng, action, pinfo
+            
+        except Exception as e:
+            print(f"No-guidance evaluation failed: {e}")
+            # Fall through to more complex version
+    
+    # Original complex version for when guidance is enabled
     try:
         # Sample psi with timeout protection
         rng, sample_rng = jax.random.split(rng)

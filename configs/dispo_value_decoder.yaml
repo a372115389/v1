@@ -18,8 +18,8 @@ feat:
 
 training:
   num_steps: 100000
-  eval_every: 5000
-  save_every: 5000
+  eval_every: 1000
+  save_every: 1000
   batch_size: 1024
   num_workers: 4
   resume: False
@@ -47,13 +47,13 @@ model:
 sampling:
   predictor: "ddim"
   corrector: "none"
-  n_inference_steps: 25
+  n_inference_steps: 1
   eta: 0.0
 
 planning:
-  planner: "online_adaptation"  # NEW: Use online world model adaptation
-  guidance_coef: 1.0  # Coefficient for gradient-based guidance
-  num_samples: 500
+  planner: "random_shooting"  # NEW: Use online world model adaptation
+  guidance_coef: 0.0  # Coefficient for gradient-based guidance
+  num_samples: 10
   num_elites: 1
   
   # Online World Model Adaptation Parameters

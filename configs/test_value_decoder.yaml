@@ -47,12 +47,12 @@ model:
 sampling:
   predictor: "ddim"
   corrector: "none"
-  n_inference_steps: 5
+  n_inference_steps: 1  # Minimal steps to avoid fori_loop complexity
   eta: 0.0
 
 planning:
   planner: "random_shooting"  # Test ValueDecoder with random shooting first
-  guidance_coef: 1.0
+  guidance_coef: 0.0  # DISABLE ALL GUIDANCE to test JIT compatibility
   num_samples: 20
   num_elites: 1
   
